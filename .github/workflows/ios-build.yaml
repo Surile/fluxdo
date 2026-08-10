@@ -1,0 +1,77 @@
+# 独立 iOS 构建 workflow：手动触发，产出未签名 IPA artifact。
+# 与 build.yaml 的区别：不需要打 release tag，随时可验证 iOS 构建是否正常。
+# 如需在 PR / push 时自动触发，取消下方注释即可。
+name: iOS Build
+
+on:
+  workflow_dispatch:
+  # pull_request:
+  #   paths:
+  #     - 'lib/**'
+  #     - 'ios/**'
+  #     - 'core/**'
+  #     - 'packages/**'
+  #     - 'pubspec.yaml'
+  #     - 'pubspec.lock'
+
+env:
+  # 与 .fvmrc 保持一致（build.yaml 中的 3.44.0 已过期）
+  FLUTTER_VERSION: '3.44.8'
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core/doh_proxy
+          key: ios
+
+      - name: Setup iOS Rust targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+
+      # SwiftTryCatch 等 pod 依赖 GitHub git 仓库，用 token 避免 rate limit
+      - name: Configure Git for CocoaPods
+        run: git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
+
+      # flutterw.dart 内部会自动执行 project_prep（pub get、l10n、证书、native 预处理）
+      - name: Build iOS (no-codesign)
+        run: |
+          dart tool/flutterw.dart build ios --release --no-codesign
+          # 校验 doh_proxy Rust 动态库符号确实链入
+          nm -gU build/ios/iphoneos/Runner.app/Runner | grep "_doh_proxy_start_with_config_json"
+
+      - name: Package IPA
+        run: |
+          SHORT_SHA=${GITHUB_SHA::7}
+          mkdir -p dist
+          cd build/ios/iphoneos
+          mkdir Payload
+          cp -r Runner.app Payload/
+          zip -rq "fluxdo-${SHORT_SHA}-unsigned.ipa" Payload
+          mv "fluxdo-${SHORT_SHA}-unsigned.ipa" ../../../dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxdo-ios-unsigned
+          path: ./dist/fluxdo-*-unsigned.ipa
+          retention-days: 30
+          if-no-files-found: error

@@ -1,18 +1,19 @@
-# 独立 iOS 构建 workflow：手动触发，产出未签名 IPA artifact。
-# 与 build.yaml 的区别：不需要打 release tag，随时可验证 iOS 构建是否正常。
-# 如需在 PR / push 时自动触发，取消下方注释即可。
+# 独立 iOS 构建 workflow：手动触发，构建未签名 IPA 并发布到 GitHub Release。
+# 与 build.yaml 的区别：不需要打 release tag，随时可验证 iOS 构建并拿到 IPA。
 name: iOS Build
 
 on:
   workflow_dispatch:
-  # pull_request:
-  #   paths:
-  #     - 'lib/**'
-  #     - 'ios/**'
-  #     - 'core/**'
-  #     - 'packages/**'
-  #     - 'pubspec.yaml'
-  #     - 'pubspec.lock'
+    inputs:
+      tag_name:
+        description: 'Release tag 名称（留空则自动用 ios-build-<短SHA>）'
+        required: false
+        default: ''
+      prerelease:
+        description: '标记为预发布'
+        type: boolean
+        required: false
+        default: true
 
 env:
   # 与 .fvmrc 保持一致（build.yaml 中的 3.44.0 已过期）
@@ -22,7 +23,7 @@ jobs:
   build-ios:
     runs-on: macos-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,17 +62,39 @@ jobs:
       - name: Package IPA
         run: |
           SHORT_SHA=${GITHUB_SHA::7}
+          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
           mkdir -p dist
           cd build/ios/iphoneos
           mkdir Payload
           cp -r Runner.app Payload/
-          zip -rq "fluxdo-${SHORT_SHA}-unsigned.ipa" Payload
-          mv "fluxdo-${SHORT_SHA}-unsigned.ipa" ../../../dist/
+          zip -rq "../../../dist/fluxdo-${SHORT_SHA}-unsigned.ipa" Payload
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: fluxdo-ios-unsigned
-          path: ./dist/fluxdo-*-unsigned.ipa
+          path: ./dist/*.ipa
           retention-days: 30
           if-no-files-found: error
+
+      - name: Resolve tag name
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag_name }}" ]; then
+            echo "name=${{ inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=ios-build-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: fluxdo iOS (unsigned) ${{ steps.tag.outputs.name }}
+          body: |
+            未签名 IPA，手动构建。
+            Commit: ${{ github.sha }}
+          prerelease: ${{ inputs.prerelease || true }}
+          files: ./dist/*.ipa
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
